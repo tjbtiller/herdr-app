@@ -398,6 +398,37 @@ pub(crate) fn cancel_policy(policy: &Rc<Policy>) {
 /// Cancels work owned by exactly one evaluated application incarnation.
 pub(crate) fn cancel_application_generation(generation: &Rc<ApplicationGeneration>) {
     generation.retire();
+    // Report work this replacement strands: a pending sleep or an awaited
+    // task never settles after this point, and before this line it vanished
+    // without a trace — the mod just looked like its waiter starved.
+    let stranded: Vec<&'static str> = TASKS.with_borrow(|tasks| {
+        tasks
+            .values()
+            .filter(|task| {
+                task.application.as_ref().is_some_and(|candidate| Rc::ptr_eq(candidate, generation))
+                    && !task.done.get()
+                    && task.callback.borrow().is_some()
+            })
+            .map(|task| task.api)
+            .collect()
+    });
+    if !stranded.is_empty() {
+        let mut counts = std::collections::BTreeMap::<&'static str, usize>::new();
+        for api in &stranded {
+            *counts.entry(api).or_default() += 1;
+        }
+        let summary = counts
+            .iter()
+            .map(|(api, n)| format!("{api}×{n}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            "an application build was replaced with {} script task(s) still pending ({}); \
+             they will never settle — re-register background work from init()",
+            stranded.len(),
+            summary
+        );
+    }
     cancel_where(|task| {
         task.application
             .as_ref()
