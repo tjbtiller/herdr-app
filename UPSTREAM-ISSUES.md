@@ -45,3 +45,64 @@ task APIs at generation retirement.
   root").
 - r5: pixel-measured — flex-chain column 25 px vs explicit `h(100)` 99 px
   in the same block; `h(400)` proves the chain fills when height exists.
+
+## Gotcha 7 (2026-11-12, found in the chat-mod adversarial audit)
+
+**`crypto.webcrypto.subtle` is declared but has no backend — calling it silently
+kills the calling task.**
+
+Verdict at HEAD (`4c8c622`, checked against `upstream/master`): real and new.
+`vendor/gpui-kit/crates/shell/src/typings.rs:3781` declares
+`export const webcrypto: Crypto;`, and the `crypto` module is registered from
+`quickjs_jit_stdlib::crypto::CryptoModule`, but nothing in `vendor/` or `src/`
+implements `subtle` (`git grep -n "subtle"` finds only a palette field). There
+is no issue filed for it (checked #926–#931 — none covers crypto).
+
+Minimal repro (a 20-line mod, scratch `HERDR_APP_HOME`, no network):
+
+```js
+import { webcrypto } from "crypto";
+cx.spawn(async () => {
+  await w("1 start");
+  await w("2 plain await OK");                  // logged
+  const g = webcrypto.getRandomValues(new Uint8Array(4));
+  await w("3 getRandomValues OK " + g.length);  // logged
+  await w("4 about to call subtle.importKey (NOT awaited)");
+  const pr = webcrypto.subtle.importKey("raw", new Uint8Array(32), "AES-GCM", false, ["encrypt"]);
+  await w("5 returned a promise: " + (pr && typeof pr.then)); // NEVER LOGGED
+});
+```
+
+Observed: the log stops on line 4. The call does not throw, does not return,
+and does not reject — the task simply ends. Same stall via
+`globalThis.crypto.subtle`, and `subtle.digest("SHA-256", …)` behaves
+identically.
+
+Second finding from the same probe: **`setTimeout` never fires in the mod
+runtime.** `await new Promise((r) => setTimeout(() => r("yes"), 100))` never
+settles, so a hanging `subtle` call cannot even be timed out from a mod. Use
+`cx.sleep`, which is host-backed.
+
+Failure mode is the #926 class (a task stranded with no exception and no log),
+but the trigger is different: it is not a reload, it is the call itself.
+
+Impact: any mod wanting AES-GCM / hashing in-process is silently dead. The chat
+mod's live collab attach needs exactly this, so it now takes an explicit
+`INPROC_CRYPTO = false` constant and a read-only fallback rather than parking
+a task; sends ride an exec'd node helper where real `webcrypto` exists.
+
+Filed status: **[#934](https://github.com/herdrdev/herdr-app/issues/934)**
+(2026-11-12, re-verified live at 0.1.15 / upstream `17eac39` in an isolated
+`HERDR_APP_HOME` window before filing).
+
+Correction from the live repro: `setTimeout` is not "inert/never settles" —
+it **throws** `TypeError: \`setTimeout\` is not available in the shell: use
+cx.timer.after(ms, callback)` (catchable). The subtle strand is exactly as
+claimed: the awaited promise never settles, the scheduler's unhandled-rejection
+report does not fire, the app log stays empty, and sibling tasks keep running.
+
+Fork-patch column: **not patchable our-side** — a real `subtle` backend is a
+runtime-engine feature, and carrying a JS crypto shim in the fork just to
+convert "strand" into "throw" would be heavier than the honest
+`INPROC_CRYPTO = false` + exec'd-node-helper workaround already in the chat
+mod. Collapses when upstream implements `subtle` (or makes it reject loudly).
