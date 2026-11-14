@@ -28,8 +28,8 @@ teachings, and closure triage: sections at the bottom of this doc.
 
 | # | Commit | Class | Collapses when |
 |---|--------|-------|----------------|
-| A | `ac245a6` `feat(mods): surface check mode to mods (herdr.checking) + warn on exec/write side effects` — `src/mods.rs`, `defaults/herdr.d.ts` | **PR open** | upstream PR [#1033](https://github.com/herdrdev/herdr-app/pull/1033) (2026-11-13, branch `feat/herdr-checking`) |
-| B | `ff83cf2` `fix(shell): report script tasks stranded by an application reload` — `vendor/gpui-kit/.../scheduler.rs` | **PR open** | upstream PR [#1034](https://github.com/herdrdev/herdr-app/pull/1034) (2026-11-13, branch `fix/reload-stranded-tasks`) |
+| A | ~~`ac245a6`~~ **merged upstream** `75fabc7` (`feat: mods can see a check run (herdr.checking) (#1033)`, merged 2026-11-14 13:56Z, closes [#927](https://github.com/herdrdev/herdr-app/issues/927)) | **merged** | dropped at next rebase: upstream owns this logic. Semantic drift = cosmetic only — dev's warn strings are shorter (`check: mod exec'd \`{command}\`; the child runs for real` vs our `herdr-app check: … — the child runs for real during check`) and upstream dropped the `pub fn set_checking()` export (sets the flag inline instead). Same flag, same `herdr.checking()` export, same three warn sites. `tyler`'s patch A will conflict textually (same hunk regions) — take upstream's side wholesale. |
+| B | `ff83cf2` `fix(shell): report script tasks stranded by an application reload` — `vendor/gpui-kit/.../scheduler.rs` | **PR open** (unchanged, 0 review/comment) | upstream PR [#1034](https://github.com/herdrdev/herdr-app/pull/1034) (2026-11-13, branch `fix/reload-stranded-tasks`) — no dev movement yet; master `5e578a0` touches the same file (window-side recovery, different crate) — no textual conflict |
 
 Both are diagnostics-only (no behavior change): A adds a flag + log lines
 + one read-only export; B adds one `tracing::warn!` naming the stranded
