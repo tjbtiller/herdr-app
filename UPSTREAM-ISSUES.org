@@ -34,7 +34,8 @@ teachings, and closure triage: sections at the bottom of this doc.
 :END:
 | ​# | Commit                                                                                                                                                                                           | Class    | Collapses when                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 |---+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| A | +=ac245a6=+ *merged upstream* =75fabc7= (=feat: mods can see a check run (herdr.checking) (#1033)=, merged 2026-11-14 13:56Z, closes [[https://github.com/herdrdev/herdr-app/issues/927][​#927]]) | *merged* | dropped at next rebase: upstream owns this logic. Semantic drift = cosmetic only --- dev's warn strings are shorter (=check: mod exec'd \={command}`; the child runs for real=vs our=herdr-app check: ... --- the child runs for real during check=) and upstream dropped the=pub fn set_checking()=export (sets the flag inline instead). Same flag, same=herdr.checking()=export, same three warn sites.=tyler='s patch A will conflict textually (same hunk regions) — take upstream's side wholesale. | | B |=ff83cf2==fix(shell): report script tasks stranded by an application reload=—=vendor/gpui-kit/.../scheduler.rs=| **PR open** (unchanged, 0 review/comment) | upstream PR [#1034](https://github.com/herdrdev/herdr-app/pull/1034) (2026-11-13, branch=fix/reload-stranded-tasks=) — no dev movement yet; master=5e578a0` touches the same file (window-side recovery, different crate) --- no textual conflict |
+| A | ~~ac245a6 / 28abe04~~ *dropped at the 2026-11-14 rebase* — upstream =75fabc7= owns the logic (=tyler='s copy conflicted in =src/mods.rs= + =defaults/herdr.d.ts= and was skipped whole; both files byte-identical to upstream since) | *dropped* | n/a — =herdr.checking()= is upstream's, deployed 2026-11-14 (receipt below) |
+| B | =7a4aaa9= =fix(shell): report script tasks stranded by an application reload= — =vendor/gpui-kit/.../scheduler.rs= (previously =ff83cf2=, =79f9ea4= before rebases) | *PR open* (unchanged, 0 review/comment) | upstream PR [[https://github.com/herdrdev/herdr-app/pull/1034][#1034]] (2026-11-13, branch =fix/reload-stranded-tasks=) — no dev movement yet; master =5e578a0= touches the same file (window-side recovery, different crate) --- no textual conflict, carried clean at the 2026-11-14 rebase |
 
 Both are diagnostics-only (no behavior change): A adds a flag + log
 lines + one read-only export; B adds one =tracing::warn!= naming the
@@ -62,6 +63,75 @@ switches away; frame-mod timers warn at the same rebuild; a check run
 reports at exit. Both PRs OPEN + MERGEABLE. When they merge: drop A/B
 from =tyler= and adopt upstream's wording wholesale (the fork commits'
 wording differs).
+
+** Rebase + attended deploy receipt (2026-11-14, the sync-app-now lane)
+:PROPERTIES:
+:CUSTOM_ID: rebase-attended-deploy-receipt-2026-11-14
+:END:
+Rebased =tyler= onto upstream master =4cc40e4= (72 commits past tag
+=v0.1.15=, none of it released): patch A (=28abe04=) conflicted exactly
+as predicted (=src/mods.rs= + =defaults/herdr.d.ts=) and was =git rebase
+--skip='d whole --- upstream's =75fabc7= is in force (=git show=
+of both files: =tyler= byte-identical to =upstream/master=). Patch B
+carried clean as =7a4aaa9=; tree diff vs upstream = B's =scheduler.rs=
+(+31) + ledger docs only; worktree clean; =upstream/master..tyler= =
+9 commits. origin/tyler's pre-rebase 5 (incl. =cb76d1d= patch A) are
+superseded --- push is =--force-with-lease= (the patch branch's
+history is disposable by design).
+
+Gates (all green, release artifact md5 =d5ded9d4…=): =bun test= 146
+pass / 0 fail; =cargo test --locked= exit 0 (every suite ok); the
+native-desktop =check_keeps_shared_state_transient= (=--ignored=) ok;
+scratch-home launch (=/tmp/herdr-sync-1114=) booted a real window and:
+
+- *#1020 recovery, hands-on*: a bomb mod allocating past the VM
+  ceiling at eval → =mod bomb failed to load: out of memory= at
+  14:53:13.176Z, then =mod memory was nearly used up; restarting this
+  window's mods= *6 ms later*; the bomb re-failed on the fresh VM
+  (14.404) with collateral victims (=spaces=, =agents= died
+  =Null"null"= --- allocation-order law intact), a third failure at
+  15.748, and *exactly one* restart line across the next 68 s --- the
+  60 s =load_recovery= backoff held against immediate re-failure. No
+  restart storm; the healthy canary (mounted first) stayed loaded with
+  no error.
+- *#1033 (=herdr.checking=), hands-on*: =herdr-app check mods/canary=
+  wrote =checking=true= to a marker (guard now works), and upstream's
+  own warn surfaced verbatim: =check: mod wrote
+  '/tmp/…/checking-marker.txt'; the write lands for real=. At normal
+  boot =checking()= = false.
+- *Badge API (#1027)*: =herdr.setBadge("7")= from the live canary, no
+  throw (beat record =badge:"ok"=); exported at =herdr.d.ts:291=.
+- *Patch B live in the same binary*: the stranded-task warning fired
+  during the check run, naming =(a HostModule's async function×2,
+  cx.timer.every(ms, fn)×1)=.
+- *#1028*: the repo's own =mod-storage.test.ts= (62 lines from
+  =d0d3202=) ran green inside the bun suite.
+
+Deploy (owner-appetite attended, same class as Friday's TUI early
+deploy): release built with =herdr-bridge-sync.sh= mechanics
+(cargo-slot, nice 19, -j4; vendored warnings only), swapped with the
+restore chain (=herdr-app.bak-lastgood= kept; =--version= green;
+deployed md5 == build md5), marker =v0.1.15-72-g4cc40e4= --- truthful:
+the 04:40 timer is tag-gated and would *not* have shipped these
+unreleased commits; it rebuilds once against the unchanged tag, then
+converges. Estate relaunch PID-scoped (Law 21: kill =3138524= → new
+=2525897=, full pane env replicated): =herdr omp list= byte-identical
+before/after, bridge machine =connected=, =status= errors =[]=,
+layouts/.state *unchanged* (snapshot kept at =/tmp/herdr-state-backup-1114=,
+no restore needed), zero =*.error= files, every mounted surface
+re-mounted clean at 07:56 (fresh per-mod typings), the regenerated
+=~/.config/herdr-app/herdr.d.ts= carries =checking()= + =setBadge()=,
+and the board mod's =check= passed. One transient startup rejection
+(=our-agents= =agents2 is not initialized= --- our own lazy-store race
+at cold start, surface alive, no status error) is a pre-existing
+class, not a deploy regression. Shot taken
+(=/tmp/estate-shot-1114.png=, 2560×1080); the vision pass on it was
+discarded as unreliable --- structural receipts above are the record.
+
+#1020 (dead-engine recovery): *fix-on-master* =5e578a0=, tracker still
+open at deploy time. #1028 (bundled-mod JSON guards): *fix-on-master*
+=d0d3202=, tracker still open. RUNTIME-LAWS Law 20 now records the
+recovery and its retire-condition.
 
 ** Verification notes (2026-11-12, repro artifacts under /tmp/herdr-repros)
 :PROPERTIES:
@@ -330,8 +400,14 @@ sha256 =363e58f7…d4590181305ff8d26=), =our-spaces/main.js:106,108=,
 =our-tabs/main.js:32= (plain sources, edited in place).
 =herdr-app check= PASS ×3; the shipped =our-agents= artifact carries all
 three guards (=changed=, =pins=, plus the pre-existing
-=agents.cmdseen=). Collapses when upstream lands #1028: our three mods
-are clones of the parents and can adopt the upstream diff wholesale.
+=agents.cmdseen=). Collapses when upstream lands #1028 --- *it landed:
+fix-on-master =d0d3202= (2026-11-14, tracker still open at deploy
+time; the repo's own =mod-storage.test.ts= from that commit runs green
+in our suite, and the guarded bundled defaults shipped in the
+2026-11-14 deploy)*: our three mods are clones of the parents and can
+adopt the upstream diff wholesale --- guards kept for now (harmless
+duplicates, our clones are estate-managed); adoption is optional
+cleanup, not a sync dependency.
 
 ** Reporting discipline --- the bar before filing anything upstream
 :PROPERTIES:
