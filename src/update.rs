@@ -9,6 +9,8 @@
 //! A build from source never updates: only `scripts/package` (the release
 //! builds) sets `HERDR_APP_RELEASE`. `scripts/install-macos` makes a
 //! Herdr.app too, so the install's shape alone can't tell.
+//! Fork (patch C): no build of this fork self-updates — the release arm of
+//! both checks is off; `herdr-bridge-sync.sh` is the only update path.
 //!
 //! The core is checked on the same clock (`core/latest.json`): a newer core
 //! of the same generation is offered (also applied after an app update), unless
@@ -120,12 +122,17 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
 }
 
 fn checks_app() -> Option<PathBuf> {
-    root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some())
+    // Fork (patch C): this build never self-updates — `herdr-bridge-sync.sh`
+    // is the only update path, and an upstream release must not replace a
+    // fork binary that carries unreleased patches. `HERDR_RELEASES_URL`
+    // stays as the test-server hatch the test suite rides.
+    root().filter(|_| std::env::var_os("HERDR_RELEASES_URL").is_some())
 }
 
 /// A release build checks the core; a source build only when pointed at a test release server.
 fn checks_core() -> bool {
-    option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()
+    // Fork (patch C): see checks_app — core updates ride the sync script too.
+    std::env::var_os("HERDR_RELEASES_URL").is_some()
 }
 
 /// For the settings screen: both programs, what's waiting, when we last looked.

@@ -11,9 +11,10 @@
 //!
 //! On unless settings.json says `"telemetry": false` (that also deletes the
 //! id and anything not sent yet). `DO_NOT_TRACK`, `HERDR_TELEMETRY=0` and CI
-//! turn it off for one run. Only release builds (`HERDR_APP_RELEASE`) send,
-//! or a build pointed at a test server with `HERDR_TELEMETRY_URL`: a build
-//! from source and the sandbox collect and show, but never send.
+//! turn it off for one run. A build pointed at a test server with
+//! `HERDR_TELEMETRY_URL` sends there. Fork (patch C): the default endpoint is
+//! never armed — no build of this fork sends to herdr.dev; from-source builds
+//! and the sandbox collect and show, but never send.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -99,10 +100,9 @@ fn read_env_off() -> Option<&'static str> {
 
 /// Where reports go, if this build sends at all.
 fn endpoint() -> Option<String> {
-    match std::env::var("HERDR_TELEMETRY_URL").ok().filter(|u| !u.is_empty()) {
-        Some(url) => Some(url),
-        None => option_env!("HERDR_APP_RELEASE").map(|_| ENDPOINT.to_owned()),
-    }
+    // Fork (patch C): release builds never arm the default endpoint — this
+    // fork ships no telemetry; only an explicit test-server URL enables a send.
+    std::env::var("HERDR_TELEMETRY_URL").ok().filter(|u| !u.is_empty())
 }
 
 pub fn collecting() -> bool {

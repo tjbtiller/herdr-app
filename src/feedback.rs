@@ -6,11 +6,10 @@ use std::path::PathBuf;
 pub const MAX_IMAGES: usize = 3;
 const MAX_IMAGE_BYTES: usize = 5 * 1024 * 1024;
 
-const ENDPOINT: &str = "https://telemetry.herdr.dev/v1/feedback";
-
 fn endpoint() -> Option<String> {
+    // Fork (patch C): release builds never arm the default endpoint — feedback
+    // from this fork goes nowhere without an explicit test-server URL.
     std::env::var("HERDR_FEEDBACK_URL").ok().filter(|u| !u.is_empty())
-        .or_else(|| option_env!("HERDR_APP_RELEASE").map(|_| ENDPOINT.to_owned()))
 }
 
 pub fn draft(message: &str, email: &str, images: usize, from: &str, layout: &str) -> Value {
@@ -116,7 +115,7 @@ pub async fn send(body: Value, shots: Vec<String>) -> Result<(), String> {
         return Err("Up to 3 screenshots.".into());
     }
     let files = shots.iter().map(|s| shot_file(s)).collect::<Result<Vec<_>, _>>()?;
-    let url = endpoint().ok_or("This build was made from source and doesn't send feedback. Use a release build.")?;
+    let url = endpoint().ok_or("This fork doesn't send feedback anywhere. Set HERDR_FEEDBACK_URL to a test server to try the send path.")?;
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
         let result = post(&url, &body.to_string(), &files);

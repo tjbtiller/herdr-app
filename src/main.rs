@@ -128,7 +128,12 @@ fn main() {
         None => {}
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
         Some("--skill") => return print!("{}", include_str!("SKILL.md")),
-        Some("-V" | "--version" | "version") => return println!("herdr-app {}", env!("CARGO_PKG_VERSION")),
+        Some("-V" | "--version" | "version") => {
+            // Fork (patch C): the in-binary release marker — `release` prints
+            // only when the build was made with HERDR_APP_RELEASE set.
+            let marker = if option_env!("HERDR_APP_RELEASE").is_some() { " release" } else { "" };
+            return println!("herdr-app {}{}", env!("CARGO_PKG_VERSION"), marker);
+        }
         Some(other) => {
             eprint!("herdr-app: unknown argument {other:?}\n\n{HELP}");
             std::process::exit(2);
