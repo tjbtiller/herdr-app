@@ -28,8 +28,8 @@ teachings, and closure triage: sections at the bottom of this doc.
 
 | # | Commit | Class | Collapses when |
 |---|--------|-------|----------------|
-| A | `ac245a6` `feat(mods): surface check mode to mods (herdr.checking) + warn on exec/write side effects` — `src/mods.rs`, `defaults/herdr.d.ts` | droppable | upstream lands #927 (check clamp or `checking()` equivalent) |
-| B | `ff83cf2` `fix(shell): report script tasks stranded by an application reload` — `vendor/gpui-kit/.../scheduler.rs` | droppable | upstream lands #926 (settle-or-log at generation retirement) |
+| A | `ac245a6` `feat(mods): surface check mode to mods (herdr.checking) + warn on exec/write side effects` — `src/mods.rs`, `defaults/herdr.d.ts` | **PR open** | upstream PR [#1033](https://github.com/herdrdev/herdr-app/pull/1033) (2026-11-13, branch `feat/herdr-checking`) |
+| B | `ff83cf2` `fix(shell): report script tasks stranded by an application reload` — `vendor/gpui-kit/.../scheduler.rs` | **PR open** | upstream PR [#1034](https://github.com/herdrdev/herdr-app/pull/1034) (2026-11-13, branch `fix/reload-stranded-tasks`) |
 
 Both are diagnostics-only (no behavior change): A adds a flag + log lines
 + one read-only export; B adds one `tracing::warn!` naming the stranded
@@ -40,6 +40,22 @@ Rebase receipt 2026-11-13: `tyler` rebased onto upstream master `69ba1ca`
 worktree clean, `upstream/master..tyler` = exactly the 5 fork commits,
 nothing pushed, nothing deployed. Ledger SHAs above are post-rebase (were
 `cb76d1d`/`ca8e90e`).
+
+Upstream PR receipts 2026-11-13: no equivalent at upstream HEAD `b67715e`
+(`checking` hits are update-check machinery only; `src/mods.rs` and the
+scheduler unchanged since `69ba1ca`). Both patches re-cut onto `b67715e` as
+single commits in upstream house style (subject-only, `feat:`/`fix:`,
+`Co-Authored-By: omp` trailer) — PR wording adapted, not fork-lifted:
+A inlines the flag-set in `install_check_policy`, upstream warn tone
+(`check: mod exec'd ...`), and adds two lifecycle tests
+(`herdr_checking_is_false_in_a_live_load` /
+`herdr_checking_is_true_while_a_check_loads_the_mod`;
+`cargo test --locked --bins herdr_checking` → 2 passed). B live-verified on
+the real display (scratch home `HC_SESSION`-isolated): a placed mod parking
+`cx.sleep(600000)` warns `(1 cx.sleep(ms))` when its layout switches away;
+frame-mod timers warn at the same rebuild; a check run reports at exit.
+Both PRs OPEN + MERGEABLE. When they merge: drop A/B from `tyler` and adopt
+upstream's wording wholesale (the fork commits' wording differs).
 
 ## Verification notes (2026-11-12, repro artifacts under /tmp/herdr-repros)
 
