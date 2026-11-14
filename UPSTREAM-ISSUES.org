@@ -36,10 +36,14 @@ teachings, and closure triage: sections at the bottom of this doc.
 |---+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+----------+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | A | ~~ac245a6 / 28abe04~~ *dropped at the 2026-11-14 rebase* — upstream =75fabc7= owns the logic (=tyler='s copy conflicted in =src/mods.rs= + =defaults/herdr.d.ts= and was skipped whole; both files byte-identical to upstream since) | *dropped* | n/a — =herdr.checking()= is upstream's, deployed 2026-11-14 (receipt below) |
 | B | =7a4aaa9= =fix(shell): report script tasks stranded by an application reload= — =vendor/gpui-kit/.../scheduler.rs= (previously =ff83cf2=, =79f9ea4= before rebases) | *PR open* (unchanged, 0 review/comment) | upstream PR [[https://github.com/herdrdev/herdr-app/pull/1034][#1034]] (2026-11-13, branch =fix/reload-stranded-tasks=) — no dev movement yet; master =5e578a0= touches the same file (window-side recovery, different crate) --- no textual conflict, carried clean at the 2026-11-14 rebase |
+| C | =c62a374= =feat(fork): release builds arm no telemetry, feedback, or self-update (patch C)= — =src/telemetry.rs= + =src/feedback.rs= + =src/update.rs= + =src/main.rs=: the =HERDR_APP_RELEASE= arm of all three vendor gates is off (telemetry + feedback endpoints compile-time disarmed; app/core self-update off, =HERDR_RELEASES_URL= kept as the test hatch), and =--version= prints a = release= marker when the flag was set | *fork-permanent* (never collapses — deliberate policy, not filed upstream) | n/a — re-arm nothing at rebase; conflicts in those hunks resolve toward the disarmed form |
 
-Both are diagnostics-only (no behavior change): A adds a flag + log
+A and B are diagnostics-only (no behavior change): A adds a flag + log
 lines + one read-only export; B adds one =tracing::warn!= naming the
-stranded task APIs at generation retirement.
+stranded task APIs at generation retirement. C is policy: it disarms
+the vendor's release-only senders in every build of this fork (the
+sync script stays the only update path; the fork ships no telemetry) —
+receipt below, 2026-11-14.
 
 Rebase receipt 2026-11-13: =tyler= rebased onto upstream master
 =69ba1ca= (brings the dev's #1006 docs into our tree); both patches
@@ -132,6 +136,63 @@ discarded as unreliable --- structural receipts above are the record.
 open at deploy time. #1028 (bundled-mod JSON guards): *fix-on-master*
 =d0d3202=, tracker still open. RUNTIME-LAWS Law 20 now records the
 recovery and its retire-condition.
+
+** Fresh release build + deploy receipt (2026-11-14, the release-build lane)
+:PROPERTIES:
+:CUSTOM_ID: fresh-release-build-deploy-receipt-2026-11-14
+:END:
+Tyler asked for the release-flagged build. Source truth of
+=HERDR_APP_RELEASE= at this tree: compile-time (=option_env!=) arm for
+(1) daily anonymous telemetry → =telemetry.herdr.dev/v1/report=,
+(2) the person-initiated feedback endpoint, (3) hourly app+core
+self-update against =releases.herdr.dev= (downloads swap in on
+quit/restart/crash). Patch C (=c62a374=) disarms all three release
+arms — settings already had =telemetry:false=, but compile-time-off is
+the standing preference, and armed self-update would have replaced the
+fork binary at the first upstream tag past =v0.1.15=, silently dropping
+patch B; =apply_on_startup= routes through the same gate, so even a
+staged upstream swap can never apply. The binary
+marker: =--version= prints =herdr-app 0.1.15 release= (plain =0.1.15=
+in source builds).
+
+Build (sync-script mechanics: cargo-slot, nice 19, -j4,
+=CARGO_TARGET_DIR=~/Projects/herdr-app-target=, =--locked=, flag set;
+log =/tmp/herdr-app-release-build-1114.log=; 29.6s warm, our crate
+zero warnings): sha256 =6f1184c1ee6cff7…= (the =cargo test --release=
+relink superseded the first link's hashes — deployed == build at swap,
+cmp-identical). Gates: release suite 477 pass / 5 fail — all five are
+=cx.debug_bounds= layout assertions in =terminal=/=window= tests,
+structurally =None= without =debug_assertions= (vendor-documented in
+=gpui-pre=), so release-profile-structural, pre-existing, unrelated to
+C; debug suite (the receipt's gate, zig on PATH per the sync script's
+=ZIG_DIR= export — first attempt died on =ghostty-sys= without it)
+482/482 = 481 + the one =failed_check_clears…= flake (listener race at
+load ≈19 during the zig build) proven green on isolated rerun; =bun
+test= skipped — C is Rust-only, the TS suites don't read these files.
+Surface gates on the artifact (sync-lane method, scratch home
+=/tmp/herdr-rel-1114= + isolated =HC_SESSION=): =check= on canary wrote
+=checking-marker.txt= with upstream's verbatim warn, beat record
+={n:1, badge:"ok", checking:true}= (#1033 + #1027 together), patch B's
+stranded-task warn fired verbatim =(...HostModule's async function×2,
+cx.timer.every(ms, fn)×1)=, bomb =check= OOM'd at =main.js:10:36= as
+designed; telemetry: no =telemetry/= dir ever created in either home,
+zero herdr.dev sockets while live.
+
+Deploy (the sync script's chain; the app was down — owner closed it at
+≈08:14 after the morning's attended deploy, so Law 21's PID-scoped kill
+was a no-op): =.bak-lastgood= kept (old md5 =d5ded9d4…= matches the
+morning receipt), deployed md5 == build md5 (cmp-identical), marker
+=.fork-built-tag= = =v0.1.15-84-g13bdf3f= (truthful describe of the
+built tree). Estate back: bare launch, niri rule placed it (window 863,
+PID =3025205=, DP-2 workspace =ai=, maximized 2560×1080), =herdr omp
+list= byte-identical before/after, lane jsonl mtimes advancing, bridge
+=herdr-tui= =connected=, =status= errors =[]= at every step,
+layouts/board+chat+home spot-switches all =ok=true= with zero =*.error=
+files, resting state = home on DP-2/ai; one =promise continuation:
+interrupted= scheduler line is teardown noise from the spot-switches
+themselves, and the =our-agents= =agents2 is not initialized= cold-start
+line is the receipt's known pre-existing class. Shot
+(=/tmp/estate-shot-rel-1114.png=, 2560×1080).
 
 ** Verification notes (2026-11-12, repro artifacts under /tmp/herdr-repros)
 :PROPERTIES:
