@@ -920,6 +920,11 @@ herdr-app check ~/.config/herdr-app/mods/<name>
 Loads the mod, renders it once, exits nonzero with the exact error. Run it
 after every change. Never call a mod done without a passing check.
 
+`init()` runs for real during a check. Import `checking` from `"herdr"` and
+use `if (checking()) return;` before starting helpers or writing files.
+`checking()` is true throughout a check and false in a live window.
+`exec`, `hc` and `writeTextFile` still run during checks and warn when called.
+
 ### A mod
 
 ```js
