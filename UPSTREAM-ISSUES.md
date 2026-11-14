@@ -22,6 +22,7 @@ teachings, and closure triage: sections at the bottom of this doc.
 | 4 | `track_scroll` ignored on lists | Real — **intended and now documented**: typings now say `list`/`uniform_list` always keep their own position; a passed handle is ignored (app-log warn); pair a `Scrollbar` of the same id | [#931](https://github.com/herdrdev/herdr-app/issues/931) **CLOSED COMPLETED 2026-11-13** via docs PR [#1006](https://github.com/herdrdev/herdr-app/pull/1006) (be6cede) | none needed (Scrollbar pairs by name — now the dev-blessed pattern) |
 | 5 | flex columns shrink-wrap | Real + undocumented: **mod content gets no definite height from its block** (px or weight); `flex_1`/`h_full` chains collapse silently (measured 25px vs explicit 99px; `h_full` is %-of-auto = no-op). The list-flavored slice got documented by PR #1006; the general block-anchoring rule + zero-height warn remain asked | [#929](https://github.com/herdrdev/herdr-app/issues/929) **open**, no response yet | explicit `h(N)` on the topmost container that must fill |
 | 6 | `check` loads phantom copies | Real, narrower than feared: fs-device writes + shared.json ARE clamped (#515 fixed that); **exec() and `herdr.writeTextFile` still run for real during check** (marker-verified; children orphaned; CAS writes bypass) | [#927](https://github.com/herdrdev/herdr-app/issues/927) **open**, no response yet. Dev takes check side effects seriously (#645, sessions killed by in-app check, closed COMPLETED) | per-boot data files; **fork patch A adds `herdr.checking()` + warn logs** |
+| 10 | synthetic pointer motion dead (hands-verify) | Real at HEAD (`69ba1ca`-era, fork patches diagnostics-only): uinput/ydotool **motion** never reaches the app — hover zero-effect, mid-drag zero motion (portal cursor metadata unchanged after a 732 px injection, held and unheld, not cadence-sensitive) — while clicks, press/release, and wheel land on the same widgets, and identical motion injections move GTK apps 1:1 in the same session. Automation can click but never drag/hover | [#1032](https://github.com/herdrdev/herdr-app/issues/1032) **open** (filed 2026-11-13, no response yet). Possibly-related upstream: #698 (real-mouse motion laggy — arrives but stutters, distinct), #5 (mod `on_hover` never dispatched), #157 (Windows-only motion-report gap) | keyboard carry for drag semantics (move/reorder via keys); clicks fully usable. Recorded in SKILL.md §5/§9 |
 
 ## Fork patches (branch `tyler`, rebase-managed by `~/tools/herdr-bridge-sync.sh`)
 
@@ -57,6 +58,33 @@ nothing pushed, nothing deployed. Ledger SHAs above are post-rebase (were
   root").
 - r5: pixel-measured — flex-chain column 25 px vs explicit `h(100)` 99 px
   in the same block; `h(400)` proves the chain fills when height exists.
+
+## Verification note — synthetic motion deadness (2026-11-13, hands-verify round, receipts /tmp/gpui-flows-receipts.jsonl)
+
+- Full-screen staged herdr-app on the real display (Wayland/niri), driven
+  by a uinput/ydotool synthetic pointer; screenshots pixel-measured;
+  pointer position cross-checked via xdg-desktop-portal screen-cast
+  cursor metadata.
+- Clicks reach GPUI widgets: card press/select produced a ~13.6k px
+  render diff, detail popup on release. Wheel reaches GPUI: 119k px
+  scroll over the chat pane.
+- Motion never does: hover zero-effect; mid-drag zero motion — portal
+  cursor position unchanged after a single 732 px injection (held and
+  unheld), and a fast 6×40 px @ 60 ms probe changed nothing either (not
+  cadence-sensitive).
+- Contrast control: identical injections against a GTK app in the same
+  session log held-motion 1:1 — the compositor and synthetic device are
+  fine; the gap is in herdr-app's input path.
+- Source read at HEAD (`69ba1ca`-era; the 5 `tyler` fork commits are
+  diagnostics-only): `vendor/gpui-pre-linux/src/linux/wayland/client.rs`
+  forwards `wl_pointer::Motion` unconditionally as
+  `PlatformInput::MouseMove` (plus a synthesized MouseMove on Enter), and
+  the gpui core `handle_input` path applies no motion filter — so the
+  block is not an obvious motion filter; suspected deeper in
+  hover/grab/pointer-seat state interaction with synthetic motion.
+  Filed as [#1032](https://github.com/herdrdev/herdr-app/issues/1032);
+  dupe sweep found only distinct neighbors (#698 laggy real-mouse motion,
+  #5 mod on_hover never dispatched, #157 Windows motion reports).
 
 ## Gotcha 7 (2026-11-12, found in the chat-mod adversarial audit)
 
@@ -220,6 +248,41 @@ accept:
   fork-side zero-height warn (#929's ask) would collide with any upstream
   warn; a `subtle` backend (#934) is engine-scale; unix-socket WebSocket
   (#928) is a transport feature upstream may take. Workarounds hold.
+
+## Gotcha 8 (2026-11-13, audit pass-III residual R1 — closed in our estate)
+
+**The bundled `agents`/`spaces`/`tabs` mods parse persisted localStorage values
+with unguarded `JSON.parse` in `init()`: one corrupted value silently kills the
+mod at every start.**
+
+Verdict at upstream master `5e578a0`: real. Five sites — `agents/main.js:86-87`
+(`changed`, `pins`), `spaces/main.js:84,86` (`machines.reconnecting`,
+`machines.folded`), `tabs/main.js:18` (`panels`). The `?? "{}"` fallback covers
+only a missing key, not a value whose payload isn't JSON. A malformed store
+*file* is already rejected loudly by the engine (storage.rs, "not a valid store
+file"); this class is one level up — a valid file with a corrupt value string.
+
+Live repro (scratch `HERDR_APP_HOME`, upstream `tabs` init line verbatim,
+0.1.15): corrupted `panels` value → cold start → no `probe` marker in the store,
+no render, nothing in the app log or `herdr-app status` (silent). Same start
+with the one-line try/catch guard → marker lands, mod loads with defaults.
+Red-green marker receipts under `/tmp/r1-live`; red/green JS-expression probe
+matches. Note: the engine reads the store once at startup — hot reload never
+sees a corrupted file; only a cold start exercises the class.
+
+Filed: **[#1028](https://github.com/herdrdev/herdr-app/issues/1028)**
+(2026-11-13). No dupe of #926–#944/#1020 (keyword sweep: parse/corrupt/store/
+localStorage/crash — nothing covers mod-side value parsing).
+
+**Our estate already fixed** (same day, before filing): guarded at the source
+per each mod's build workflow — `our-agents/main.js.bak-20261113:227-228`
+(rebuilt with esbuild `--minify-whitespace`, `"use strict";` re-prepended;
+shipped `main.js` sha256 `363e58f7…d4590181305ff8d26`), `our-spaces/main.js:106,108`,
+`our-tabs/main.js:32` (plain sources, edited in place). `herdr-app check` PASS
+×3; the shipped `our-agents` artifact carries all three guards
+(`changed`, `pins`, plus the pre-existing `agents.cmdseen`). Collapses when
+upstream lands #1028: our three mods are clones of the parents and can adopt
+the upstream diff wholesale.
 
 ## Reporting discipline — the bar before filing anything upstream
 
