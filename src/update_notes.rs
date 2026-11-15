@@ -36,7 +36,7 @@ fn parse_for_os(text: &str, os: &str) -> Vec<Note> {
     let mut notes: Vec<Note> = Vec::new();
     let mut fixed = false;
     for line in text.lines().map(str::trim) {
-        if let Some(heading) = line.strip_prefix("## [") {
+        if let Some(heading) = line.strip_prefix("## [").or_else(|| line.strip_prefix("** [")) {
             if let Some((version, date)) = heading.split_once("] - ") {
                 notes.push(Note { version: version.into(), date: date.into(), ..Note::default() });
                 fixed = false;
@@ -44,8 +44,8 @@ fn parse_for_os(text: &str, os: &str) -> Vec<Note> {
         } else if let Some(note) = notes.last_mut() {
             if let Some(platforms) = line.strip_prefix("<!-- spotlight ").and_then(|s| s.strip_suffix("-->")) {
                 note.spotlight |= platforms.trim().is_empty() || platforms.split_whitespace().any(|platform| platform == os);
-            } else if line.starts_with("### ") {
-                fixed = line == "### Fixed";
+            } else if let Some(section) = line.strip_prefix("### ").or_else(|| line.strip_prefix("*** ")) {
+                fixed = section == "Fixed";
             } else if let Some(url) = line.strip_prefix("![").and_then(|s| s.split_once("](")).and_then(|(_, s)| s.strip_suffix(')')) {
                 if url.starts_with("https://") && let Some(item) = note.items.last_mut() {
                     item.media.push(Media { path: url.into(), ..Media::default() });
@@ -141,7 +141,7 @@ pub fn has(version: &str) -> bool {
 }
 
 fn all() -> Vec<Note> {
-    let mut notes = parse(include_str!("../CHANGELOG.md"));
+    let mut notes = parse(include_str!("../CHANGELOG.org"));
     let fetched = FETCHED.lock().unwrap().get_or_insert_with(|| {
         std::fs::read_to_string(path("update-notes-cache.md")).map(|s| parse(&s)).unwrap_or_default()
     }).clone();
@@ -407,6 +407,16 @@ mod tests {
         assert_eq!(notes[1].items[0].detail, "Another thing");
         assert!(notes[1].items[0].headline.is_empty());
         assert!(!notes[1].items[0].fixed);
-        assert_eq!(parse(include_str!("../CHANGELOG.md"))[0].version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(parse(include_str!("../CHANGELOG.org"))[0].version, env!("CARGO_PKG_VERSION"));
+    }
+    #[test]
+    fn org_changelog_sections_parse_like_markdown() {
+        let notes = parse("* Herdr changelog\n\n** [1.8.0] - 2026-10-23\n\n*** New\n- **A headline.** Its detail.\n\n*** Fixed\n- A short fix.\n");
+        assert_eq!(notes[0].version, "1.8.0");
+        assert_eq!(notes[0].date, "2026-10-23");
+        assert_eq!(notes[0].items[0].headline, "A headline.");
+        assert_eq!(notes[0].items[0].detail, "Its detail.");
+        assert!(!notes[0].items[0].fixed);
+        assert!(notes[0].items[1].fixed);
     }
 }
