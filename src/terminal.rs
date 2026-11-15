@@ -2965,6 +2965,137 @@ mod tests {
         });
     }
 
+    /// vt3 lab (herdr-bridge scripts/vt3-stage3-proof.py): the machine pane
+    /// TYPE rendering raw bytes from its VT grid. The real attach is drained
+    /// on this thread, then replayed through the view's own attached/ingest
+    /// chain from the test thread — gpui's test scheduler forbids wakes from
+    /// foreign threads, so the hc reader's pacing stays with the suite's
+    /// other tests; everything downstream of the bytes is the real path.
+    #[gpui::test]
+    #[ignore = "vt3 lab: run from herdr-bridge scripts/vt3-stage3-proof.py"]
+    fn raw_attached_machine_pane_type_renders_from_its_vt(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        let Ok(sock) = std::env::var("VT3_TUI_SOCKET") else { return };
+        assert!(std::env::var("HC_SESSION").unwrap().starts_with("vt3-"), "isolated session (Law 22)");
+        let pane = std::env::var("VT3_PANE").unwrap();
+        let (cols, rows): (u16, u16) = std::env::var("VT3_GEOMETRY").unwrap().split_once('x').map(|(c, r)| (c.parse().unwrap(), r.parse().unwrap())).unwrap();
+        let tui = |method: &str, params: serde_json::Value| -> serde_json::Value {
+            use std::io::{BufRead as _, BufReader, Write as _};
+            use std::os::unix::net::UnixStream;
+            let mut s = UnixStream::connect(&sock).unwrap();
+            s.write_all(format!("{}\n", serde_json::json!({"id": "1", "method": method, "params": params})).as_bytes()).unwrap();
+            let line = BufReader::new(s).lines().next().unwrap().unwrap();
+            serde_json::from_str(&line).unwrap()
+        };
+
+        // The real machine attach (the ask rides these params): drain it here.
+        let core = crate::hc::Core::connect().unwrap();
+        let real = core.attach(&format!("tui/{pane}"), cols, rows, serde_json::json!({})).unwrap();
+        let mut batches: Vec<Vec<u8>> = Vec::new();
+        let mut quiet = 0;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while std::time::Instant::now() < deadline {
+            match real.stream.try_recv() {
+                Ok(crate::hc::Stream::Data(bytes)) => {
+                    core.credit(real.channel, bytes.len());
+                    batches.push(bytes);
+                    quiet = 0;
+                }
+                Ok(_) => break,
+                Err(_) => {
+                    quiet += 1;
+                    if quiet > 30 { break; }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+        let drained: usize = batches.iter().map(Vec::len).sum();
+        assert!(drained > 0, "the machine attach delivered bytes");
+
+        // The pane type on those bytes, deterministically.
+        // The pane type on those bytes, deterministically: bind the channel
+        // through the view's own attached(), then feed its ingest loop (the
+        // reader task's exact body) from this thread.
+        let (dead_tx, dead_rx) = async_channel::unbounded::<crate::hc::Stream>();
+        let view = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), format!("tui/{pane}"), (cols, rows), cx));
+        cx.run_until_parked();
+        view.update(cx, |view, _| view.fit(cols, rows, size(px(8.), px(16.)), 1.));
+        cx.run_until_parked();
+        let fed = crate::hc::Attached { channel: real.channel, stream: dead_rx, terminal: serde_json::json!({"title": "vt3"}) };
+        view.update(cx, |view, cx| view.attached(Ok(fed), (cols, rows), cx));
+        let _ = dead_tx;
+        for bytes in &batches {
+            view.update(cx, |view, cx| view.ingest(Some(crate::hc::Stream::Data(bytes.clone())), cx));
+            cx.run_until_parked();
+        }
+        cx.run_until_parked();
+        let total = view.read_with(cx, |view, _| view.grid.borrow().vt.scrollbar().total);
+        assert!(total > rows as u64, "the tail replay left history: {} rows from {} bytes", total, drained);
+
+        // The grid twin at idle: the view's screen equals the TUI's own.
+        let theirs = tui("pane.read", serde_json::json!({"pane_id": pane, "source": "visible", "format": "text"}))
+            ["result"]["read"]["text"].as_str().unwrap().to_string();
+        let screen = view.update(cx, |view, cx| {
+            view.select_all(cx);
+            let all = view.grid.borrow().vt.selection_text().unwrap_or_default();
+            view.grid.borrow_mut().vt.clear_selection();
+            all
+        });
+        let lines: Vec<&str> = screen.lines().collect();
+        let mine: Vec<String> = lines[lines.len().saturating_sub(rows as usize)..].iter().map(|l| l.trim_end().to_string()).collect();
+        let mut theirs: Vec<String> = theirs.lines().map(|l| l.trim_end().to_string()).collect();
+        if theirs.len() > rows as usize { theirs = theirs[theirs.len() - rows as usize..].to_vec(); }
+        assert_eq!(mine, theirs, "the pane type renders the TUI's own screen");
+
+        // Live bytes keep flowing into the same view without re-attach.
+        let marker = format!("VT3-VIEW-{}", std::process::id());
+        tui("pane.send_input", serde_json::json!({"pane_id": pane, "text": format!("echo {marker}"), "keys": ["Enter"]}));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut live: Vec<Vec<u8>> = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match real.stream.try_recv() {
+                Ok(crate::hc::Stream::Data(bytes)) => {
+                    core.credit(real.channel, bytes.len());
+                    live.push(bytes);
+                }
+                Ok(_) => break,
+                Err(_) => {
+                    if !live.is_empty() && live.iter().map(Vec::len).sum::<usize>() > 40 {
+                        break; // the echo and the next prompt have landed
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+            }
+        }
+        for bytes in &live {
+            view.update(cx, |view, cx| view.ingest(Some(crate::hc::Stream::Data(bytes.clone())), cx));
+            cx.run_until_parked();
+        }
+        let seen = view.read_with(cx, |view, _| {
+            let mut g = view.grid.borrow_mut();
+            g.vt.select_all();
+            let hit = g.vt.selection_text().is_some_and(|t| t.contains(&marker));
+            g.vt.clear_selection();
+            hit
+        });
+        assert!(seen, "live output reached the view's grid");
+
+        // The copy surface: select_all spans history+screen and the
+        // clipboard receives it (what terminal.copy copies). The formatter
+        // trims one trailing blank row, so the count may sit one under total.
+        view.update(cx, |view, cx| {
+            view.select_all(cx);
+            let rows_total = view.grid.borrow().vt.scrollbar().total;
+            assert!(view.copy(cx), "copy takes the selection");
+            let text = cx.read_from_clipboard().unwrap().text().unwrap_or_default();
+            view.grid.borrow_mut().vt.clear_selection();
+            assert!((rows_total as i64 - text.lines().count() as i64).abs() <= 1, "select_all spans history and screen: {} vs {}", text.lines().count(), rows_total);
+            assert!(text.contains("__VT3_END_") || text.contains(&marker), "the copy carries the pane's real content");
+        });
+        core.detach(real.channel);
+        eprintln!("vt3 pane type: {} replay bytes + {} live batches, history {total} rows, screen parity OK", drained, live.len());
+    }
+
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
         use gpui::*;

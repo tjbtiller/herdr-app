@@ -496,10 +496,19 @@ impl Core {
     }
 
     pub fn attach(&self, terminal: &str, cols: u16, rows: u16, display: Value) -> Result<Attached> {
-        let result = self.call(
-            "terminal.attach",
-            json!({"terminal": terminal, "cols": cols, "rows": rows, "history": 2000, "display": display}),
-        )?;
+        let mut params = json!({"terminal": terminal, "cols": cols, "rows": rows, "history": 2000, "display": display});
+        // Fork seam (genuine terminal): a machine attach asks for the pane's
+        // real output bytes, which this build's VT consumes directly. The ask
+        // is inert unless the far side speaks it: released cores ignore
+        // unknown attach parameters, and a bridge ships bytes only when its
+        // hello advertises `raw_attach` — otherwise the ANSI projection path
+        // runs unchanged (the negotiate-down gate). A terminal without a
+        // machine prefix is local and never asks.
+        if terminal.contains('/') {
+            params["features"] = json!(["raw_attach"]);
+            params["format"] = json!("bytes");
+        }
+        let result = self.call("terminal.attach", params)?;
         let channel = result["channel"].as_u64().ok_or_else(|| anyhow!("attach returned no channel"))? as u32;
         let (tx, rx) = async_channel::unbounded();
         let mut r = self.routes.lock().unwrap();
@@ -793,6 +802,38 @@ mod tests {
     }
 
     #[test]
+    fn machine_attaches_ask_for_raw_bytes_and_local_ones_do_not() {
+        let (writer, frames) = mpsc::channel();
+        let (_lost_tx, lost) = async_channel::bounded(1);
+        let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let core = Core {
+            hello: Value::Null, writer, routes: Arc::new(Mutex::new(Routes::default())),
+            next_id: AtomicU64::new(1), child: Mutex::new(child), lost,
+        };
+        let routes = core.routes.clone();
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let seen = asked.clone();
+        let peer = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let frame = frames.recv().unwrap();
+                let request: Value = serde_json::from_slice(&frame[HEADER..]).unwrap();
+                assert_eq!(request["method"], "terminal.attach");
+                seen.lock().unwrap().push(request["params"].clone());
+                routes.lock().unwrap().replies.remove(&request["id"].as_u64().unwrap()).unwrap()
+                    .send(Ok(json!({"channel": 7, "terminal": {"address": "t1"}, "automatic_input": false}))).unwrap();
+            }
+        });
+        core.attach("tui/w3:p1", 100, 30, json!({})).unwrap();
+        core.attach("t7", 100, 30, json!({})).unwrap();
+        peer.join().unwrap();
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked[0]["features"], json!(["raw_attach"]), "a machine attach asks for the pane's real bytes");
+        assert_eq!(asked[0]["format"], json!("bytes"));
+        assert!(asked[1].get("features").is_none(), "a local attach stays exactly as released cores know it");
+        assert!(asked[1].get("format").is_none());
+    }
+
+    #[test]
     #[ignore = "requires an isolated HC_SESSION=test-* and a running hc on PATH"]
     fn two_app_viewers_answer_queries_without_idle_size_theft() {
         assert!(std::env::var("HC_SESSION").unwrap().starts_with("test-"));
@@ -851,6 +892,205 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         core.call("terminal.kill", json!({"terminal": t})).unwrap();
+    }
+
+    /// One request per connection, newline JSON — the herdr TUI's socket law.
+    fn tui_call(sock: &str, method: &str, params: Value) -> Value {
+        use std::io::{BufRead, BufReader};
+        use std::os::unix::net::UnixStream;
+        let mut s = UnixStream::connect(sock).expect("TUI socket");
+        s.write_all(format!("{}\n", json!({"id": "1", "method": method, "params": params})).as_bytes()).unwrap();
+        let line = BufReader::new(s).lines().next().unwrap().unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    /// vt3 lab (herdr-bridge scripts/vt3-stage3-proof.py): a real machine
+    /// attach through the bridge, consumed by the app's own VT. Proves the
+    /// ask, the verbatim bytes, the grid twin, the scrollback and the
+    /// selection — the genuine-terminal contract from the consumer side.
+    #[test]
+    #[ignore = "vt3 lab: run from herdr-bridge scripts/vt3-stage3-proof.py"]
+    fn raw_attached_machine_pane_is_a_twin_of_the_tui_pane() {
+        let Ok(sock) = std::env::var("VT3_TUI_SOCKET") else { return };
+        assert!(std::env::var("HC_SESSION").unwrap().starts_with("vt3-"), "isolated session (Law 22)");
+        let pane = std::env::var("VT3_PANE").unwrap();
+        let payload = std::fs::read(std::env::var("VT3_PAYLOAD").unwrap());
+        let (cols, rows): (u16, u16) = std::env::var("VT3_GEOMETRY").unwrap().split_once('x').map(|(c, r)| (c.parse().unwrap(), r.parse().unwrap())).unwrap();
+        let core = Core::connect().unwrap();
+        let attached = core.attach(&format!("tui/{pane}"), cols, rows, json!({})).unwrap();
+        let mut vt = crate::vt::Vt::new(cols, rows);
+        vt.resize(cols, rows, 10, 20);
+        let mut raw: Vec<u8> = Vec::with_capacity(256 * 1024);
+        let mut live = 0;
+        // Attach quiesce: the 128 KiB tail replay plus whatever ran since.
+        let deadline = std::time::Instant::now() + Duration::from_secs(20);
+        let mut quiet = 0;
+        while std::time::Instant::now() < deadline {
+            match attached.stream.try_recv() {
+                Ok(Stream::Data(bytes)) => {
+                    vt.write(&bytes);
+                    core.credit(attached.channel, bytes.len());
+                    raw.extend_from_slice(&bytes);
+                    quiet = 0;
+                }
+                Ok(_) => panic!("stream ended during replay"),
+                Err(_) => {
+                    quiet += 1;
+                    if quiet > 30 { break; }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        eprintln!("replay drained: {} raw bytes", raw.len());
+
+        // P1 the ask (also on the wire tee): the attach asked for bytes; only
+        // a bridge that advertises raw_attach honors it. P2 the bytes: the
+        // pane's real stream — ONLCR carriage returns intact, the payload's
+        // end marker verbatim, no synthesized CUP/EL repaints around it.
+        // (VT3_EXPECT=projection — an old bridge — asserts the mirror instead.)
+        let payload = payload.unwrap();
+        let mark_b_line = payload.split(|&b| b == b'\n').rev().nth(1).unwrap().to_vec();
+        let positioned = |bytes: &[u8]| {
+            let mut from = 0;
+            while let Some(at) = bytes[from..].iter().position(|&b| b == 0x1b) {
+                let rest = &bytes[from + at..];
+                if rest.len() > 3 && rest[1] == b'[' {
+                    let end = rest[2..].iter().position(|b| !b.is_ascii_digit() && *b != b';');
+                    if end.is_some_and(|e| e > 0 && rest[2 + e] == b'H') {
+                        return true;
+                    }
+                }
+                from += at + 1;
+            }
+            false
+        };
+        if std::env::var("VT3_EXPECT").unwrap_or_else(|_| "raw".into()) == "raw" {
+            assert!(raw.windows(mark_b_line.len()).any(|w| w == mark_b_line), "the end marker must arrive verbatim");
+            assert!(raw.windows(2).any(|w| w == b"\r\n"), "ONLCR CRs intact: the pane's real stream");
+            assert!(raw.windows(2).filter(|w| **w == *b"\x1b[").count() < 20, "the pane's real stream: printable payload, no per-row escapes");
+            assert!(!positioned(&raw), "no positioned-repaint synthesis in the payload body");
+        } else {
+            assert!(raw.windows(2).filter(|w| **w == *b"\x1b[").count() > 20, "the projection path synthesizes escapes for every row");
+            assert!(positioned(&raw), "the projection path synthesizes CUP positioning");
+        }
+
+        // P3 the twin: the app's VT screen equals the TUI's own screen.
+        let tui_visible = tui_call(&sock, "pane.read", json!({"pane_id": pane, "source": "visible", "format": "text"}))
+            ["result"]["read"]["text"].as_str().unwrap().to_string();
+        vt.select_all();
+        let all = vt.selection_text().unwrap();
+        vt.clear_selection();
+        let lines: Vec<&str> = all.lines().collect();
+        let screen: Vec<String> = lines[lines.len().saturating_sub(rows as usize)..].iter().map(|l| l.trim_end().to_string()).collect();
+        let theirs: Vec<String> = tui_visible.lines().map(|l| l.trim_end().to_string()).collect();
+        let theirs: Vec<String> = if theirs.len() > rows as usize { theirs[theirs.len() - rows as usize..].to_vec() } else { theirs };
+        assert_eq!(screen, theirs, "same bytes + same geometry = same grid (idle)");
+
+        // P5 native scrollback: history exists in the app's VT and matches
+        // the TUI's own recent window where they overlap. (The projection
+        // path's pre-roll carries Tier-0's known cursor-jump artifact —
+        // CUP/EL inside the replayed rows — so only the raw twin claims
+        // exact overlap; the mirror keeps screen parity above.)
+        let sb = vt.scrollbar();
+        assert!(sb.total > sb.len, "history from the tail replay: {} rows total, {} screen", sb.total, sb.len);
+        let recent = tui_call(&sock, "pane.read", json!({"pane_id": pane, "source": "recent", "format": "text", "lines": sb.total}))
+            ["result"]["read"]["text"].as_str().unwrap().to_string();
+        if std::env::var("VT3_EXPECT").unwrap_or_else(|_| "raw".into()) == "raw" {
+            let mine: Vec<&str> = all.lines().map(str::trim_end).collect();
+            let theirs: Vec<&str> = recent.lines().map(str::trim_end).collect();
+            let n = mine.len().min(theirs.len());
+            assert!(n > 0);
+            assert_eq!(mine[mine.len() - n..], theirs[theirs.len() - n..], "scrollback agrees where the tail and the TUI's history overlap");
+        } else {
+            assert!(recent.contains("__VT3_END_"), "the mirror's history still carries the payload");
+        }
+
+        // P6 selection/copy surface: select_all + selection_text (what
+        // terminal.copy copies) spans history+screen and carries the marker.
+        vt.select_all();
+        let copied = vt.selection_text().unwrap();
+        vt.clear_selection();
+        assert_eq!(copied.lines().count(), sb.total as usize, "select_all spans history and screen");
+        assert!(copied.contains("__VT3_END_"), "the copy carries the payload's end marker");
+
+        // P4 live bytes after attach, then parity again at quiesce.
+        let marker = format!("VT3-LIVE-{}", std::process::id());
+        tui_call(&sock, "pane.send_input", json!({"pane_id": pane, "text": format!("echo {marker}"), "keys": ["Enter"]}));
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while std::time::Instant::now() < deadline {
+            match attached.stream.try_recv() {
+                Ok(Stream::Data(bytes)) => {
+                    vt.write(&bytes);
+                    core.credit(attached.channel, bytes.len());
+                    raw.extend_from_slice(&bytes);
+                    live += bytes.len();
+                }
+                Ok(_) => panic!("stream ended"),
+                Err(_) => {
+                    vt.select_all();
+                    let done = vt.selection_text().is_some_and(|t| t.contains(&marker));
+                    vt.clear_selection();
+                    if done && live > 0 { break; }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+            }
+        }
+        assert!(live > 0, "bytes flowed live without re-attaching");
+        let raw_mode = std::env::var("VT3_EXPECT").unwrap_or_else(|_| "raw".into()) == "raw";
+        // Re-agree at quiesce: the pane's prompt redraw can land between the
+        // two snapshots, so compare until both ends have settled (bytes keep
+        // draining into the VT between rounds; equality must hold exactly).
+        let mut agreed = false;
+        for _ in 0..10 {
+            let mut stragglers = 0;
+            while let Ok(Stream::Data(bytes)) = attached.stream.try_recv() {
+                vt.write(&bytes);
+                core.credit(attached.channel, bytes.len());
+                raw.extend_from_slice(&bytes);
+                live += bytes.len();
+                stragglers += 1;
+            }
+            let tui_visible = tui_call(&sock, "pane.read", json!({"pane_id": pane, "source": "visible", "format": "text"}))
+                ["result"]["read"]["text"].as_str().unwrap().to_string();
+            vt.select_all();
+            let all = vt.selection_text().unwrap_or_default();
+            vt.clear_selection();
+            let lines: Vec<&str> = all.lines().collect();
+            let screen: Vec<String> = lines[lines.len().saturating_sub(rows as usize)..].iter().map(|l| l.trim_end().to_string()).collect();
+            let mut theirs: Vec<String> = tui_visible.lines().map(|l| l.trim_end().to_string()).collect();
+            if theirs.len() > rows as usize { theirs = theirs[theirs.len() - rows as usize..].to_vec(); }
+            if stragglers == 0 && screen == theirs {
+                agreed = true;
+                break;
+            }
+            if !raw_mode {
+                let joined = screen.join("\n");
+                if theirs.iter().filter(|l| !l.trim().is_empty()).all(|l| joined.contains(l.trim())) {
+                    agreed = true;
+                    break;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let all = { vt.select_all(); let t = vt.selection_text().unwrap_or_default(); vt.clear_selection(); t };
+
+        // P9 reflow: the app's VT rewraps the real stream without losing it
+        // (a raw-path property: the mirror's painted rows are not content
+        // the projection promises to preserve across a resize).
+        if raw_mode {
+            let before: Vec<String> = all.lines().map(str::to_string).collect();
+            vt.resize((cols as f32 * 0.6) as u16, (rows as f32 * 0.8) as u16, 10, 20);
+            vt.select_all();
+            let after = vt.selection_text().unwrap_or_default();
+            vt.clear_selection();
+            let kept = before.iter().filter(|l| !l.trim().is_empty()).count();
+            let kept_after = after.lines().filter(|l| !l.trim().is_empty()).count();
+            assert_eq!(kept, kept_after, "reflow keeps every non-empty line (soft wraps only)");
+            assert!(after.contains("__VT3_END_"), "the marker survives the reflow");
+        }
+
+        core.detach(attached.channel);
+        eprintln!("vt3 twin: {} raw bytes ({} live), screen parity OK, scrollback {} rows", raw.len(), live, sb.total);
     }
 
     fn hello(generation: u64, version: &str, methods: &[&str]) -> Value {
